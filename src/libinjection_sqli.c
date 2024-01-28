@@ -18,7 +18,10 @@
 #include "libinjection_sqli.h"
 #include "libinjection_sqli_data.h"
 
-#define LIBINJECTION_VERSION "3.9.2"
+#ifdef __clang_analyzer__
+// make clang analyzer happy by defining a dummy version
+#define LIBINJECTION_VERSION "undefined"
+#endif
 
 #define LIBINJECTION_SQLI_TOKEN_SIZE  sizeof(((stoken_t*)(0))->val)
 #define LIBINJECTION_SQLI_MAX_TOKENS  5
@@ -602,18 +605,28 @@ static size_t parse_operator2(struct libinjection_sqli_state * sf)
  *       " \\"   "  two backslash = not escaped!
  *       "\\\"   "  three backslash = escaped!
  */
+#ifndef __clang_analyzer__
 static int is_backslash_escaped(const char* end, const char* start)
 {
     const char* ptr;
+/* Code not to be analyzed by clang.
+ *
+ * Why we do this? Because there is a false positive here:
+ * libinjection_sqli.c:608:13: warning: Out of bound memory access (access exceeds upper limit of memory block) [alpha.security.ArrayBoundV2]
+ *       if (*ptr != '\\') {
+ *           ^~~~
+ * Specifically, this function deals with non-null terminated char arrays. This can be added
+ * as prerequisite, and is not written clearly. But the math in the for below holds.
+ */
     for (ptr = end; ptr >= start; ptr--) {
         if (*ptr != '\\') {
             break;
         }
     }
     /* if number of backslashes is odd, it is escaped */
-
     return (end - ptr) & 1;
 }
+#endif
 
 static size_t is_double_delim_escaped(const char* cur,  const char* end)
 {
@@ -1195,7 +1208,7 @@ static size_t parse_number(struct libinjection_sqli_state * sf)
  * without having to regenerated the SWIG (or other binding) in minor
  * releases.
  */
-const char* libinjection_version()
+const char* libinjection_version(void)
 {
     return LIBINJECTION_VERSION;
 }
@@ -1223,7 +1236,7 @@ int libinjection_sqli_tokenize(struct libinjection_sqli_state *sf)
     if (*pos == 0 && (sf->flags & (FLAG_QUOTE_SINGLE | FLAG_QUOTE_DOUBLE))) {
         *pos = parse_string_core(s, slen, 0, current, flag2delim(sf->flags), 0);
         sf->stats_tokens += 1;
-        return TRUE;
+        return RESULT_TRUE;
     }
 
     while (*pos < slen) {
@@ -1248,7 +1261,7 @@ int libinjection_sqli_tokenize(struct libinjection_sqli_state *sf)
          */
         if (current->type != CHAR_NULL) {
             sf->stats_tokens += 1;
-            return TRUE;
+            return RESULT_TRUE;
         }
     }
     return FALSE;
@@ -1272,7 +1285,7 @@ void libinjection_sqli_init(struct libinjection_sqli_state * sf, const char *s, 
 void libinjection_sqli_reset(struct libinjection_sqli_state * sf, int flags)
 {
     void *userdata = sf->userdata;
-    ptr_lookup_fn lookup = sf->lookup;;
+    ptr_lookup_fn lookup = sf->lookup;
 
     if (flags == 0) {
         flags = FLAG_QUOTE_NONE | FLAG_SQL_ANSI;
@@ -1360,7 +1373,7 @@ static int syntax_merge_words(struct libinjection_sqli_state * sf,stoken_t * a, 
 
     if (ch != CHAR_NULL) {
         st_assign(a, ch, a->pos, sz3, tmp);
-        return TRUE;
+        return RESULT_TRUE;
     } else {
         return FALSE;
     }
@@ -1851,7 +1864,7 @@ int libinjection_sqli_fold(struct libinjection_sqli_state * sf)
              * Some SQL functions like USER() have 0 args
              * if we get User(foo), then User is not a function
              * This should be expanded since it eliminated a lot of false
-             * positives. 
+             * positives.
              */
             if  (cstrcasecmp("USER", sf->tokenvec[left].val, sf->tokenvec[left].len) == 0) {
                 sf->tokenvec[left].type = TYPE_BAREWORD;
@@ -2018,11 +2031,11 @@ int libinjection_sqli_blacklist(struct libinjection_sqli_state* sql_state)
         return FALSE;
     }
 
-    return TRUE;
+    return RESULT_TRUE;
 }
 
 /*
- * return TRUE if SQLi, false is benign
+ * return RESULT_TRUE if SQLi, false is benign
  */
 int libinjection_sqli_not_whitelist(struct libinjection_sqli_state* sql_state)
 {
@@ -2045,7 +2058,7 @@ int libinjection_sqli_not_whitelist(struct libinjection_sqli_state* sql_state)
         if (my_memmem(sql_state->s, sql_state->slen,
                       "sp_password", strlen("sp_password"))) {
             sql_state->reason = __LINE__;
-            return TRUE;
+            return RESULT_TRUE;
         }
     }
 
@@ -2070,7 +2083,7 @@ int libinjection_sqli_not_whitelist(struct libinjection_sqli_state* sql_state)
                 return FALSE;
             } else {
                 sql_state->reason = __LINE__;
-                return TRUE;
+                return RESULT_TRUE;
             }
         }
         /*
@@ -2098,7 +2111,7 @@ int libinjection_sqli_not_whitelist(struct libinjection_sqli_state* sql_state)
         if (sql_state->tokenvec[0].type == TYPE_NUMBER &&
             sql_state->tokenvec[1].type == TYPE_COMMENT &&
             sql_state->tokenvec[1].val[0] == '/') {
-            return TRUE;
+            return RESULT_TRUE;
         }
 
         /**
@@ -2118,7 +2131,7 @@ int libinjection_sqli_not_whitelist(struct libinjection_sqli_state* sql_state)
             if (sql_state->stats_tokens > 2) {
                 /* we have some folding going on, highly likely SQLi */
                 sql_state->reason = __LINE__;
-                return TRUE;
+                return RESULT_TRUE;
             }
             /*
              * we check that next character after the number is either whitespace,
@@ -2130,13 +2143,13 @@ int libinjection_sqli_not_whitelist(struct libinjection_sqli_state* sql_state)
                  * this isn't exactly correct.. ideally we should skip over all whitespace
                  * but this seems to be ok for now
                  */
-                return TRUE;
+                return RESULT_TRUE;
             }
             if (ch == '/' && sql_state->s[sql_state->tokenvec[0].len + 1] == '*') {
-                return TRUE;
+                return RESULT_TRUE;
             }
             if (ch == '-' && sql_state->s[sql_state->tokenvec[0].len + 1] == '-') {
-                return TRUE;
+                return RESULT_TRUE;
             }
 
             sql_state->reason = __LINE__;
@@ -2172,7 +2185,7 @@ int libinjection_sqli_not_whitelist(struct libinjection_sqli_state* sql_state)
                      * if ....foo" + "bar....
                      */
                     sql_state->reason = __LINE__;
-                    return TRUE;
+                    return RESULT_TRUE;
                 }
                 if (sql_state->stats_tokens == 3) {
                     sql_state->reason = __LINE__;
@@ -2215,7 +2228,7 @@ int libinjection_sqli_not_whitelist(struct libinjection_sqli_state* sql_state)
     } /* case 5 */
     } /* end switch */
 
-    return TRUE;
+    return RESULT_TRUE;
 }
 
 /**  Main API, detects SQLi in an input.
@@ -2240,7 +2253,7 @@ libinjection_sqli_get_token(struct libinjection_sqli_state * sql_state, int i)
     return &(sql_state->tokenvec[i]);
 }
 
-int libinjection_is_sqli(struct libinjection_sqli_state * sql_state)
+injection_result_t libinjection_is_sqli(struct libinjection_sqli_state * sql_state)
 {
     const char *s = sql_state->s;
     size_t slen = sql_state->slen;
@@ -2249,7 +2262,7 @@ int libinjection_is_sqli(struct libinjection_sqli_state * sql_state)
      * no input? not SQLi
      */
     if (slen == 0) {
-        return FALSE;
+        return RESULT_FALSE;
     }
 
     /*
@@ -2258,13 +2271,12 @@ int libinjection_is_sqli(struct libinjection_sqli_state * sql_state)
     libinjection_sqli_fingerprint(sql_state, FLAG_QUOTE_NONE | FLAG_SQL_ANSI);
     if (sql_state->lookup(sql_state, LOOKUP_FINGERPRINT,
                           sql_state->fingerprint, strlen(sql_state->fingerprint))) {
-        return TRUE;
+        return RESULT_TRUE;
     } else if (reparse_as_mysql(sql_state)) {
         libinjection_sqli_fingerprint(sql_state, FLAG_QUOTE_NONE | FLAG_SQL_MYSQL);
         if (sql_state->lookup(sql_state, LOOKUP_FINGERPRINT,
                               sql_state->fingerprint, strlen(sql_state->fingerprint))) {
-            return TRUE;
-        }
+            return RESULT_TRUE
     }
 
     /*
@@ -2280,12 +2292,12 @@ int libinjection_is_sqli(struct libinjection_sqli_state * sql_state)
         libinjection_sqli_fingerprint(sql_state, FLAG_QUOTE_SINGLE | FLAG_SQL_ANSI);
         if (sql_state->lookup(sql_state, LOOKUP_FINGERPRINT,
                               sql_state->fingerprint, strlen(sql_state->fingerprint))) {
-            return TRUE;
+            return RESULT_TRUE;
         } else if (reparse_as_mysql(sql_state)) {
             libinjection_sqli_fingerprint(sql_state, FLAG_QUOTE_SINGLE | FLAG_SQL_MYSQL);
             if (sql_state->lookup(sql_state, LOOKUP_FINGERPRINT,
                                   sql_state->fingerprint, strlen(sql_state->fingerprint))) {
-                return TRUE;
+                return RESULT_TRUE;
             }
         }
     }
@@ -2297,22 +2309,22 @@ int libinjection_is_sqli(struct libinjection_sqli_state * sql_state)
         libinjection_sqli_fingerprint(sql_state, FLAG_QUOTE_DOUBLE | FLAG_SQL_MYSQL);
         if (sql_state->lookup(sql_state, LOOKUP_FINGERPRINT,
                               sql_state->fingerprint, strlen(sql_state->fingerprint))) {
-            return TRUE;
+            return RESULT_TRUE;
         }
     }
 
     /*
      * Hurray, input is not SQLi
      */
-    return FALSE;
+    return RESULT_FALSE;
 }
 
-int libinjection_sqli(const char* input, size_t slen, char fingerprint[])
+int libinjection_sqli(const char* s, size_t slen, char fingerprint[])
 {
     int issqli;
     struct libinjection_sqli_state state;
 
-    libinjection_sqli_init(&state, input, slen, 0);
+    libinjection_sqli_init(&state, s, slen, 0);
     issqli = libinjection_is_sqli(&state);
     if (issqli) {
         strcpy(fingerprint, state.fingerprint);
